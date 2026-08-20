@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
 import { parseArgs } from "node:util";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+const runStartedAt = new Date();
 
 const { values } = parseArgs({
   options: {
@@ -10,6 +14,7 @@ const { values } = parseArgs({
     interval: { type: "string", default: "120" },
     iterations: { type: "string", default: "10" },
     warmup: { type: "string", default: "3" },
+    output: { type: "string" },
   },
 });
 
@@ -31,6 +36,7 @@ endpoint.searchParams.set("operation", values.operation);
 
 let previousBootId;
 const samples = [];
+const allSamples = [];
 
 for (let index = -warmup; index < iterations; index += 1) {
   const phase = index < 0 ? "warmup" : "sample";
@@ -42,8 +48,10 @@ for (let index = -warmup; index < iterations; index += 1) {
 
   const rebooted = previousBootId !== undefined && previousBootId !== body.bootId;
   previousBootId = body.bootId;
-  const sample = { phase, index: Math.max(index, 0), clientLatencyMs, rebooted, ...body };
+  const sampleIndex = phase === "warmup" ? index + warmup : index;
+  const sample = { phase, index: sampleIndex, clientLatencyMs, rebooted, ...body };
   console.log(JSON.stringify(sample));
+  allSamples.push(sample);
   if (phase === "sample") samples.push(sample);
 
   const isLast = index === iterations - 1;
@@ -54,18 +62,36 @@ for (let index = -warmup; index < iterations; index += 1) {
 }
 
 const latencies = samples.map((sample) => sample.rpcLatencyMs).sort((a, b) => a - b);
-console.error(JSON.stringify({
-  summary: {
-    samples: samples.length,
-    reboots: samples.filter((sample) => sample.rebooted).length,
-    rpcLatencyMs: {
-      min: percentile(latencies, 0),
-      p50: percentile(latencies, 0.5),
-      p95: percentile(latencies, 0.95),
-      max: percentile(latencies, 1),
-    },
+const summary = {
+  samples: samples.length,
+  reboots: samples.filter((sample) => sample.rebooted).length,
+  rpcLatencyMs: {
+    min: percentile(latencies, 0),
+    p50: percentile(latencies, 0.5),
+    p95: percentile(latencies, 0.95),
+    max: percentile(latencies, 1),
   },
+};
+console.error(JSON.stringify({ summary }));
+
+const outputDirectory = resolve(values.output ?? `reports/${runStartedAt.toISOString().replaceAll(":", "-")}`);
+await mkdir(outputDirectory, { recursive: true });
+await writeFile(
+  resolve(outputDirectory, "samples.jsonl"),
+  `${allSamples.map((sample) => JSON.stringify(sample)).join("\n")}\n`,
+);
+await writeFile(resolve(outputDirectory, "report.md"), renderReport({
+  endpoint: endpoint.toString(),
+  intervalSeconds,
+  warmup,
+  iterations,
+  runStartedAt,
+  runFinishedAt: new Date(),
+  samples: allSamples,
+  summary,
 }));
+console.error(`Report: ${resolve(outputDirectory, "report.md")}`);
+console.error(`Raw samples: ${resolve(outputDirectory, "samples.jsonl")}`);
 
 function percentile(sorted, fraction) {
   if (sorted.length === 0) return null;
@@ -88,4 +114,69 @@ function nonNegativeInteger(value, name) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
   return parsed;
+}
+
+function renderReport(run) {
+  const measured = run.samples.filter((sample) => sample.phase === "sample");
+  const warm = run.samples.filter(
+    (sample, index) => sample.phase === "warmup" && index > 0 && !sample.rebooted,
+  );
+  const warmRpc = warm.map((sample) => sample.rpcLatencyMs).sort((a, b) => a - b);
+  const cold = measured.filter((sample) => sample.rebooted || sample.idleForMs === null);
+  const coldRpc = cold.map((sample) => sample.rpcLatencyMs).sort((a, b) => a - b);
+  const warmMedian = percentile(warmRpc, 0.5);
+  const coldMedian = percentile(coldRpc, 0.5);
+  const ratio = warmMedian && coldMedian ? coldMedian / warmMedian : null;
+  const rows = run.samples.map((sample) =>
+    `| ${sample.phase} ${sample.index} | ${sample.rpcLatencyMs.toFixed(1)} | ${sample.clientLatencyMs.toFixed(1)} | ${sample.rebooted ? "yes" : "no"} | ${sample.bootId} | ${sample.instanceAgeMs} | ${sample.idleForMs ?? "null"} |`,
+  ).join("\n");
+
+  return `# Durable Object latency report
+
+Generated automatically by \`scripts/probe.mjs\`.
+
+## Result
+
+${cold.length === measured.length
+    ? `All ${measured.length} measured post-idle calls re-instantiated the Durable Object.`
+    : `${cold.length} of ${measured.length} measured post-idle calls re-instantiated the Durable Object.`}
+${warmMedian === null || coldMedian === null
+    ? "There were not enough warm and cold samples to calculate a comparison."
+    : `Median RPC latency was ${warmMedian.toFixed(1)} ms warm and ${coldMedian.toFixed(1)} ms after re-instantiation (${ratio.toFixed(1)}× higher).`}
+
+## Configuration
+
+- Endpoint: \`${run.endpoint}\`
+- Started: ${run.runStartedAt.toISOString()}
+- Finished: ${run.runFinishedAt.toISOString()}
+- Warm-up requests: ${run.warmup}
+- Measured requests: ${run.iterations}
+- Idle interval: ${run.intervalSeconds} seconds
+
+## Summary
+
+- Re-instantiations: ${run.summary.reboots}/${run.summary.samples}
+- Measured RPC latency min: ${format(run.summary.rpcLatencyMs.min)} ms
+- Measured RPC latency p50: ${format(run.summary.rpcLatencyMs.p50)} ms
+- Measured RPC latency p95: ${format(run.summary.rpcLatencyMs.p95)} ms
+- Measured RPC latency max: ${format(run.summary.rpcLatencyMs.max)} ms
+- Warm RPC median: ${format(warmMedian)} ms
+- Re-instantiated RPC median: ${format(coldMedian)} ms
+
+## Samples
+
+| Request | RPC ms | Client ms | New boot | Boot ID | Instance age ms | Idle ms |
+|---|---:|---:|:---:|---|---:|---:|
+${rows}
+
+## Interpretation
+
+A changed \`bootId\` proves that the Durable Object constructor ran again. An \`idleForMs\` value of \`null\` and \`instanceAgeMs\` of zero independently identify a fresh in-memory instance. \`rpcLatencyMs\` is measured by the outer Worker around the Durable Object RPC call; \`clientLatencyMs\` includes the public network round trip.
+
+Raw, line-delimited samples are stored beside this report in \`samples.jsonl\`.
+`;
+}
+
+function format(value) {
+  return value === null ? "n/a" : value.toFixed(1);
 }

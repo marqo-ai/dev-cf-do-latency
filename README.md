@@ -24,6 +24,13 @@ pnpm probe -- --url https://cf-do-latency-repro.<subdomain>.workers.dev \
   --interval 120 --iterations 20 > samples.jsonl
 ```
 
+Every completed run also creates a timestamped directory under `reports/` containing:
+
+- `report.md`: a self-contained report with configuration, conclusions, percentiles, restart evidence, and a per-request table.
+- `samples.jsonl`: the complete machine-readable dataset, including warm-up requests.
+
+Use `--output reports/my-run` to choose a stable output directory.
+
 Use `--operation write` to measure an update followed by a read. Every operation performs a SQLite read, and writes persist `payload`, `sequence`, and `updated_at`. Use `--object some-name` to select a deterministic DO instance.
 
 The default 120-second interval targets the reported behavior. Cloudflare's lifecycle documentation says hibernateable DOs may hibernate after about 10 seconds of inactivity, while idle non-hibernateable objects are normally evicted after 70–140 seconds. Eviction timing is runtime-controlled, so `bootId`, `instanceAgeMs`, and `rebooted` are more reliable indicators than assuming every delayed request was a cold start.
