@@ -14,7 +14,7 @@ Then run periodic probes against the deployed URL:
 
 ```sh
 pnpm probe -- --url https://cf-do-latency-repro.<subdomain>.workers.dev \
-  --interval 120 --iterations 20 --warmup 3 --operation read
+  --interval 120 --iterations 20 --warmup 3
 ```
 
 The client emits one JSON object per request to stdout and a summary to stderr. Redirect stdout to retain raw data:
@@ -31,7 +31,7 @@ Every completed run also creates a timestamped directory under `reports/` contai
 
 Use `--output reports/my-run` to choose a stable output directory.
 
-Use `--operation write` to measure an update followed by a read. Every operation performs a SQLite read, and writes persist `payload`, `sequence`, and `updated_at`. Use `--object some-name` to select a deterministic DO instance.
+Every probe increments a counter in SQLite, proving that data survives re-instantiation. Use `--object some-name` to select a deterministic DO instance.
 
 The default 120-second interval targets the reported behavior. Cloudflare's lifecycle documentation says hibernateable DOs may hibernate after about 10 seconds of inactivity, while idle non-hibernateable objects are normally evicted after 70–140 seconds. Eviction timing is runtime-controlled, so `bootId`, `instanceAgeMs`, and `rebooted` are more reliable indicators than assuming every delayed request was a cold start.
 
@@ -42,14 +42,12 @@ The default 120-second interval targets the reported behavior. Cloudflare's life
 - `bootId`: random ID generated whenever the DO constructor runs.
 - `instanceAgeMs`: time since that constructor started.
 - `idleForMs`: time since the prior call to the same in-memory instance; `null` on a fresh instance.
-- `constructorSqlMs`: schema/initial-row SQL time during construction.
-- `operationSqlMs`: SQL time for this probe.
-- `persistedSequence` and `payload`: proof that state survives instance re-instantiation.
+- `sequence`: the SQLite-persisted counter, proving that state survives instance re-instantiation.
 
 Local development validates behavior and persistence, but it cannot reproduce production placement, eviction, or cold-start latency. Use a deployed Worker for meaningful measurements.
 
 ## Direct request
 
 ```sh
-curl 'https://cf-do-latency-repro.<subdomain>.workers.dev/probe?object=repro&operation=write&payload=test'
+curl 'https://cf-do-latency-repro.<subdomain>.workers.dev/probe?object=repro'
 ```

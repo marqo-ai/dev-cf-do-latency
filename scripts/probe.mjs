@@ -10,7 +10,6 @@ const { values } = parseArgs({
   options: {
     url: { type: "string" },
     object: { type: "string", default: "repro" },
-    operation: { type: "string", default: "read" },
     interval: { type: "string", default: "120" },
     iterations: { type: "string", default: "10" },
     warmup: { type: "string", default: "3" },
@@ -26,13 +25,8 @@ if (!values.url) {
 const intervalSeconds = positiveNumber(values.interval, "interval");
 const iterations = positiveInteger(values.iterations, "iterations");
 const warmup = nonNegativeInteger(values.warmup, "warmup");
-if (values.operation !== "read" && values.operation !== "write") {
-  throw new Error("operation must be read or write");
-}
-
 const endpoint = new URL("/probe", values.url);
 endpoint.searchParams.set("object", values.object);
-endpoint.searchParams.set("operation", values.operation);
 
 let previousBootId;
 const samples = [];
