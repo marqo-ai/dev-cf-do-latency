@@ -4,10 +4,10 @@
 
 | State | RPC p50 | RPC p90 | RPC max | Client p50 | Client p90 | Client max | New boot IDs |
 |---|---:|---:|---:|---:|---:|---:|:---:|
-| Newly created / initially inactive | 621.0 | 665.0 | 707.0 | 647.5 | 707.3 | 724.3 | 10/10 |
-| Active, in-memory | 30.0 | 32.0 | 86.0 | 45.4 | 52.5 | 100.1 | 0/10 |
-| Idle, in-memory hibernateable (5s) | 29.0 | 32.0 | 33.0 | 41.7 | 53.7 | 109.9 | 0/10 |
-| Hibernated or inactive (120s) | 367.0 | 514.0 | 781.0 | 431.9 | 533.9 | 797.3 | 10/10 |
+| Newly created / initially inactive | 579.0 | 611.0 | 1040.0 | 604.9 | 681.8 | 1053.2 | 10/10 |
+| Active, in-memory | 31.0 | 32.0 | 359.0 | 44.0 | 49.1 | 371.4 | 0/10 |
+| Idle, in-memory hibernateable (5s) | 30.0 | 31.0 | 324.0 | 44.0 | 126.0 | 336.7 | 0/10 |
+| Hibernated or inactive (120s) | 350.0 | 432.0 | 549.0 | 379.4 | 477.2 | 563.1 | 10/10 |
 
 All latency values are milliseconds. RPC latency is measured in the Worker around the Durable Object call; client latency is the complete public HTTP round trip.
 
@@ -16,8 +16,8 @@ All latency values are milliseconds. RPC latency is measured in the Worker aroun
 - Deployed endpoint: `https://cf-do-latency-repro.edwin-3a8.workers.dev`
 - Lifecycle definitions: https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/
 - Objects per state: 10
-- Started: 2026-08-20T20:15:51.995Z
-- Finished: 2026-08-20T20:18:09.019Z
+- Started: 2026-08-20T20:47:46.229Z
+- Finished: 2026-08-20T20:50:03.339Z
 - Each first call uses a new, deterministically named SQLite-backed Durable Object. Cloudflare defines every new object as initially inactive.
 - Active calls run immediately after all objects have been created.
 - Idle calls follow 5 seconds without traffic, below the documented 10-second hibernation threshold.

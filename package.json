@@ -12,9 +12,10 @@
     "types": "wrangler types"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "latest",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@types/node": "26.2.0",
     "typescript": "~5.9.0",
     "vitest": "latest",
-    "wrangler": "latest"
+    "wrangler": "4.125.0"
   }
 }

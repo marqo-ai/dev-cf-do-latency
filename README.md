@@ -1,53 +1,79 @@
-# Cloudflare Durable Object cold-start latency repro
+# Cloudflare Durable Object lifecycle latency repro
 
-This Worker measures the latency of RPC calls to a SQLite-backed Durable Object. Each response includes end-to-end Worker-to-DO RPC latency, SQLite operation time, constructor/schema time, instance age, and a random `bootId` created by the DO constructor. A changed `bootId` is direct evidence that the object was re-instantiated between probes.
+This repository reproduces the latency difference between calls to a SQLite-backed Durable Object in different lifecycle states.
 
-## Run it
+It is designed to answer one question: **how much slower is a Durable Object call after the object has been removed from memory, compared with an active or briefly idle object?**
+
+The benchmark reports p50, p90, and maximum latency for:
+
+1. A newly created object, which Cloudflare defines as initially inactive.
+2. An active, in-memory object.
+3. An idle, hibernateable object after 5 seconds without traffic.
+4. A hibernated or inactive object after 120 seconds without traffic.
+
+Cloudflare does not expose whether an object waking after a long delay was still hibernated or had transitioned to inactive. The final category is therefore deliberately combined. See Cloudflare's [Durable Object lifecycle documentation](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/).
+
+## How it works
+
+`src/index.ts` contains one Durable Object and one Worker route:
+
+- `GET /probe?object=<name>` calls the named Durable Object over RPC.
+- The Durable Object increments a counter in its SQLite storage.
+- The constructor creates a random `bootId` that changes whenever the in-memory instance is recreated.
+- The persisted counter demonstrates that SQLite data survives recreation.
+- The outer Worker measures only the Worker-to-Durable-Object RPC latency.
+
+`scripts/probe.mjs` creates a cohort of independently named objects and calls every object in each lifecycle phase. Sharing the two waiting periods across the cohort produces multiple samples in about two minutes instead of waiting two minutes separately for every sample.
+
+Each run writes:
+
+- `report.md` — headline p50, p90, and maximum RPC/client latency by lifecycle state.
+- `samples.jsonl` — every raw request and its timing, boot ID, instance age, idle duration, and persisted sequence.
+
+## Run the repro
+
+Requirements: Node.js 22+ and pnpm.
 
 ```sh
 pnpm install
 pnpm check
 pnpm deploy
+
+pnpm probe -- \
+  --url https://cf-do-latency-repro.<subdomain>.workers.dev \
+  --samples 10 \
+  --idle 5 \
+  --hibernated 120
 ```
 
-Then run periodic probes against the deployed URL:
+Reports are written to a timestamped directory under `reports/`. To choose the path and object-name prefix:
 
 ```sh
-pnpm probe -- --url https://cf-do-latency-repro.<subdomain>.workers.dev \
-  --samples 10 --idle 5 --hibernated 120
+pnpm probe -- \
+  --url https://cf-do-latency-repro.<subdomain>.workers.dev \
+  --output reports/my-run \
+  --object my-run
 ```
 
-The client emits one JSON object per request to stdout and a summary to stderr. Redirect stdout to retain raw data:
+Use a deployed Worker for meaningful lifecycle latency measurements. Local development can validate RPC and SQLite persistence, but it cannot reproduce production placement or eviction behavior.
 
-```sh
-pnpm probe -- --url https://cf-do-latency-repro.<subdomain>.workers.dev \
-  --samples 10 --idle 5 --hibernated 120
-```
+## What the fields mean
 
-Every completed run also creates a timestamped directory under `reports/` containing:
+- `rpcLatencyMs`: time measured by the outer Worker around the Durable Object RPC.
+- `clientLatencyMs`: complete public HTTP round trip measured by the Node.js client.
+- `bootId`: random identifier for the current in-memory Durable Object instance.
+- `newBoot`: whether the boot ID changed since the previous call to that object.
+- `instanceAgeMs`: time since the current constructor ran.
+- `idleForMs`: time since the previous request handled by the same in-memory instance; `null` after recreation.
+- `sequence`: counter persisted in the Durable Object's SQLite storage.
 
-- `report.md`: a lifecycle comparison of newly created/initially inactive, active, idle, and hibernated-or-inactive latency with p50, p90, max, and restart evidence.
-- `samples.jsonl`: the complete machine-readable dataset, including warm-up requests.
+## Cloudflare versions
 
-Use `--output reports/my-run` to choose a stable output directory.
+The project pins current Cloudflare releases so the reproduction does not depend on legacy APIs:
 
-Every probe increments a counter in SQLite, proving that data survives re-instantiation. Use `--object some-name` to select a deterministic DO instance.
+- Wrangler `4.125.0`
+- `@cloudflare/vitest-pool-workers` `0.22.0`
+- `workerd` `1.20260820.1` through Wrangler
+- Compatibility date `2026-08-20`
 
-The default 120-second interval targets the reported behavior. Cloudflare's lifecycle documentation says hibernateable DOs may hibernate after about 10 seconds of inactivity, while idle non-hibernateable objects are normally evicted after 70–140 seconds. Eviction timing is runtime-controlled, so `bootId`, `instanceAgeMs`, and `rebooted` are more reliable indicators than assuming every delayed request was a cold start.
-
-## Response fields
-
-- `rpcLatencyMs`: time measured in the outer Worker around the DO RPC call.
-- `clientLatencyMs`: full public HTTP round trip, added by the probe client.
-- `bootId`: random ID generated whenever the DO constructor runs.
-- `instanceAgeMs`: time since that constructor started.
-- `idleForMs`: time since the prior call to the same in-memory instance; `null` on a fresh instance.
-- `sequence`: the SQLite-persisted counter, proving that state survives instance re-instantiation.
-
-Local development validates behavior and persistence, but it cannot reproduce production placement, eviction, or cold-start latency. Use a deployed Worker for meaningful measurements.
-
-## Direct request
-
-```sh
-curl 'https://cf-do-latency-repro.<subdomain>.workers.dev/probe?object=repro'
-```
+The Durable Object uses current typed RPC and a `new_sqlite_classes` migration; it does not use the legacy fetch-style Durable Object API or KV-backed Durable Object storage.
