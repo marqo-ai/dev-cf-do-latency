@@ -14,19 +14,19 @@ Then run periodic probes against the deployed URL:
 
 ```sh
 pnpm probe -- --url https://cf-do-latency-repro.<subdomain>.workers.dev \
-  --interval 120 --iterations 20 --warmup 3
+  --samples 10 --idle 5 --hibernated 120
 ```
 
 The client emits one JSON object per request to stdout and a summary to stderr. Redirect stdout to retain raw data:
 
 ```sh
 pnpm probe -- --url https://cf-do-latency-repro.<subdomain>.workers.dev \
-  --interval 120 --iterations 20 > samples.jsonl
+  --samples 10 --idle 5 --hibernated 120
 ```
 
 Every completed run also creates a timestamped directory under `reports/` containing:
 
-- `report.md`: a self-contained report with configuration, conclusions, percentiles, restart evidence, and a per-request table.
+- `report.md`: a lifecycle comparison of newly created/initially inactive, active, idle, and hibernated-or-inactive latency with p50, p90, max, and restart evidence.
 - `samples.jsonl`: the complete machine-readable dataset, including warm-up requests.
 
 Use `--output reports/my-run` to choose a stable output directory.

@@ -1,176 +1,142 @@
 #!/usr/bin/env node
 
-import { parseArgs } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { parseArgs } from "node:util";
 
-const runStartedAt = new Date();
-
-const { values } = parseArgs({
-  options: {
-    url: { type: "string" },
-    object: { type: "string", default: "repro" },
-    interval: { type: "string", default: "120" },
-    iterations: { type: "string", default: "10" },
-    warmup: { type: "string", default: "3" },
-    output: { type: "string" },
-  },
-});
+const startedAt = new Date();
+const { values } = parseArgs({ options: {
+  url: { type: "string" },
+  object: { type: "string", default: "repro" },
+  samples: { type: "string", default: "10" },
+  idle: { type: "string", default: "5" },
+  hibernated: { type: "string", default: "120" },
+  output: { type: "string" },
+} });
 
 if (!values.url) {
-  console.error("Usage: pnpm probe -- --url https://<worker>.workers.dev [--interval 120] [--iterations 10]");
+  console.error("Usage: pnpm probe -- --url https://<worker>.workers.dev [--samples 10]");
   process.exit(1);
 }
 
-const intervalSeconds = positiveNumber(values.interval, "interval");
-const iterations = positiveInteger(values.iterations, "iterations");
-const warmup = nonNegativeInteger(values.warmup, "warmup");
-const endpoint = new URL("/probe", values.url);
-endpoint.searchParams.set("object", values.object);
-
-let previousBootId;
+const sampleCount = integer(values.samples, "samples");
+const idleSeconds = number(values.idle, "idle");
+const hibernatedSeconds = number(values.hibernated, "hibernated");
+const runId = startedAt.toISOString().replaceAll(/[:.]/g, "-");
+const objects = Array.from({ length: sampleCount }, (_, index) => `${values.object}-${runId}-${index}`);
+const previousBootIds = new Map();
 const samples = [];
-const allSamples = [];
 
-for (let index = -warmup; index < iterations; index += 1) {
-  const phase = index < 0 ? "warmup" : "sample";
-  const clientStartedAt = performance.now();
-  const response = await fetch(endpoint, { cache: "no-store" });
-  const body = await response.json();
-  const clientLatencyMs = performance.now() - clientStartedAt;
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${JSON.stringify(body)}`);
+for (const object of objects) await probe("startup", object);
+for (const object of objects) await probe("warm", object);
 
-  const rebooted = previousBootId !== undefined && previousBootId !== body.bootId;
-  previousBootId = body.bootId;
-  const sampleIndex = phase === "warmup" ? index + warmup : index;
-  const sample = { phase, index: sampleIndex, clientLatencyMs, rebooted, ...body };
-  console.log(JSON.stringify(sample));
-  allSamples.push(sample);
-  if (phase === "sample") samples.push(sample);
+await wait(idleSeconds);
+for (const object of objects) await probe("idle", object);
 
-  const isLast = index === iterations - 1;
-  if (!isLast) {
-    const delayMs = index < -1 ? 100 : intervalSeconds * 1000;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-}
+await wait(hibernatedSeconds);
+for (const object of objects) await probe("hibernated", object);
 
-const latencies = samples.map((sample) => sample.rpcLatencyMs).sort((a, b) => a - b);
-const summary = {
-  samples: samples.length,
-  reboots: samples.filter((sample) => sample.rebooted).length,
-  rpcLatencyMs: {
-    min: percentile(latencies, 0),
-    p50: percentile(latencies, 0.5),
-    p95: percentile(latencies, 0.95),
-    max: percentile(latencies, 1),
-  },
-};
-console.error(JSON.stringify({ summary }));
-
-const outputDirectory = resolve(values.output ?? `reports/${runStartedAt.toISOString().replaceAll(":", "-")}`);
-await mkdir(outputDirectory, { recursive: true });
-await writeFile(
-  resolve(outputDirectory, "samples.jsonl"),
-  `${allSamples.map((sample) => JSON.stringify(sample)).join("\n")}\n`,
-);
-await writeFile(resolve(outputDirectory, "report.md"), renderReport({
-  endpoint: endpoint.toString(),
-  intervalSeconds,
-  warmup,
-  iterations,
-  runStartedAt,
-  runFinishedAt: new Date(),
-  samples: allSamples,
-  summary,
+const categories = ["startup", "warm", "idle", "hibernated"];
+const summary = Object.fromEntries(categories.map((category) => {
+  const group = samples.filter((sample) => sample.category === category);
+  return [category, {
+    rpcLatencyMs: stats(group.map((sample) => sample.rpcLatencyMs)),
+    clientLatencyMs: stats(group.map((sample) => sample.clientLatencyMs)),
+    newBoots: group.filter((sample) => sample.newBoot).length,
+  }];
 }));
+
+const outputDirectory = resolve(values.output ?? `reports/${runId}`);
+await mkdir(outputDirectory, { recursive: true });
+await writeFile(resolve(outputDirectory, "samples.jsonl"), `${samples.map((sample) => JSON.stringify(sample)).join("\n")}\n`);
+await writeFile(resolve(outputDirectory, "report.md"), report());
 console.error(`Report: ${resolve(outputDirectory, "report.md")}`);
 console.error(`Raw samples: ${resolve(outputDirectory, "samples.jsonl")}`);
 
+async function probe(category, object) {
+  const endpoint = new URL("/probe", values.url);
+  endpoint.searchParams.set("object", object);
+  const before = performance.now();
+  const response = await fetch(endpoint, { cache: "no-store" });
+  const body = await response.json();
+  const clientLatencyMs = performance.now() - before;
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${JSON.stringify(body)}`);
+
+  const previousBootId = previousBootIds.get(object);
+  const sample = {
+    category,
+    object,
+    clientLatencyMs,
+    newBoot: previousBootId === undefined || previousBootId !== body.bootId,
+    ...body,
+  };
+  previousBootIds.set(object, body.bootId);
+  samples.push(sample);
+  console.log(JSON.stringify(sample));
+}
+
+function stats(values) {
+  const sorted = values.toSorted((a, b) => a - b);
+  return { p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9), max: sorted.at(-1) };
+}
+
 function percentile(sorted, fraction) {
-  if (sorted.length === 0) return null;
-  return sorted[Math.ceil(fraction * sorted.length) - 1] ?? sorted[0];
+  return sorted[Math.ceil(fraction * sorted.length) - 1];
 }
 
-function positiveNumber(value, name) {
+function number(value, name) {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${name} must be positive`);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be non-negative`);
   return parsed;
 }
 
-function positiveInteger(value, name) {
-  const parsed = positiveNumber(value, name);
-  if (!Number.isInteger(parsed)) throw new Error(`${name} must be an integer`);
+function integer(value, name) {
+  const parsed = number(value, name);
+  if (!Number.isInteger(parsed) || parsed === 0) throw new Error(`${name} must be a positive integer`);
   return parsed;
 }
 
-function nonNegativeInteger(value, name) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
-  return parsed;
+function wait(seconds) {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
 }
 
-function renderReport(run) {
-  const measured = run.samples.filter((sample) => sample.phase === "sample");
-  const warm = run.samples.filter(
-    (sample, index) => sample.phase === "warmup" && index > 0 && !sample.rebooted,
-  );
-  const warmRpc = warm.map((sample) => sample.rpcLatencyMs).sort((a, b) => a - b);
-  const cold = measured.filter((sample) => sample.rebooted || sample.idleForMs === null);
-  const coldRpc = cold.map((sample) => sample.rpcLatencyMs).sort((a, b) => a - b);
-  const warmMedian = percentile(warmRpc, 0.5);
-  const coldMedian = percentile(coldRpc, 0.5);
-  const ratio = warmMedian && coldMedian ? coldMedian / warmMedian : null;
-  const rows = run.samples.map((sample) =>
-    `| ${sample.phase} ${sample.index} | ${sample.rpcLatencyMs.toFixed(1)} | ${sample.clientLatencyMs.toFixed(1)} | ${sample.rebooted ? "yes" : "no"} | ${sample.bootId} | ${sample.instanceAgeMs} | ${sample.idleForMs ?? "null"} |`,
-  ).join("\n");
+function report() {
+  const row = (category, label) => {
+    const result = summary[category];
+    return `| ${label} | ${fmt(result.rpcLatencyMs.p50)} | ${fmt(result.rpcLatencyMs.p90)} | ${fmt(result.rpcLatencyMs.max)} | ${fmt(result.clientLatencyMs.p50)} | ${fmt(result.clientLatencyMs.p90)} | ${fmt(result.clientLatencyMs.max)} | ${result.newBoots}/${sampleCount} |`;
+  };
 
   return `# Durable Object latency report
 
-Generated automatically by \`scripts/probe.mjs\`.
+## Headline results
 
-## Result
+| State | RPC p50 | RPC p90 | RPC max | Client p50 | Client p90 | Client max | New boot IDs |
+|---|---:|---:|---:|---:|---:|---:|:---:|
+${row("startup", "Newly created / initially inactive")}
+${row("warm", "Active, in-memory")}
+${row("idle", `Idle, in-memory hibernateable (${idleSeconds}s)`)}
+${row("hibernated", `Hibernated or inactive (${hibernatedSeconds}s)`)}
 
-${cold.length === measured.length
-    ? `All ${measured.length} measured post-idle calls re-instantiated the Durable Object.`
-    : `${cold.length} of ${measured.length} measured post-idle calls re-instantiated the Durable Object.`}
-${warmMedian === null || coldMedian === null
-    ? "There were not enough warm and cold samples to calculate a comparison."
-    : `Median RPC latency was ${warmMedian.toFixed(1)} ms warm and ${coldMedian.toFixed(1)} ms after re-instantiation (${ratio.toFixed(1)}× higher).`}
+All latency values are milliseconds. RPC latency is measured in the Worker around the Durable Object call; client latency is the complete public HTTP round trip.
 
-## Configuration
+## Method
 
-- Endpoint: \`${run.endpoint}\`
-- Started: ${run.runStartedAt.toISOString()}
-- Finished: ${run.runFinishedAt.toISOString()}
-- Warm-up requests: ${run.warmup}
-- Measured requests: ${run.iterations}
-- Idle interval: ${run.intervalSeconds} seconds
+- Deployed endpoint: \`${new URL(values.url).origin}\`
+- Lifecycle definitions: https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/
+- Objects per state: ${sampleCount}
+- Started: ${startedAt.toISOString()}
+- Finished: ${new Date().toISOString()}
+- Each first call uses a new, deterministically named SQLite-backed Durable Object. Cloudflare defines every new object as initially inactive.
+- Active calls run immediately after all objects have been created.
+- Idle calls follow ${idleSeconds} seconds without traffic, below the documented 10-second hibernation threshold.
+- Hibernated/inactive calls follow another ${hibernatedSeconds} seconds without traffic.
+- A new \`bootId\` means the constructor ran again. Cloudflare does not expose whether a re-instantiated object was hibernated or had transitioned from hibernated to inactive, so the final state is deliberately combined.
+- The SQLite \`sequence\` counter verifies that persisted data survives new in-memory instances.
 
-## Summary
-
-- Re-instantiations: ${run.summary.reboots}/${run.summary.samples}
-- Measured RPC latency min: ${format(run.summary.rpcLatencyMs.min)} ms
-- Measured RPC latency p50: ${format(run.summary.rpcLatencyMs.p50)} ms
-- Measured RPC latency p95: ${format(run.summary.rpcLatencyMs.p95)} ms
-- Measured RPC latency max: ${format(run.summary.rpcLatencyMs.max)} ms
-- Warm RPC median: ${format(warmMedian)} ms
-- Re-instantiated RPC median: ${format(coldMedian)} ms
-
-## Samples
-
-| Request | RPC ms | Client ms | New boot | Boot ID | Instance age ms | Idle ms |
-|---|---:|---:|:---:|---|---:|---:|
-${rows}
-
-## Interpretation
-
-A changed \`bootId\` proves that the Durable Object constructor ran again. An \`idleForMs\` value of \`null\` and \`instanceAgeMs\` of zero independently identify a fresh in-memory instance. \`rpcLatencyMs\` is measured by the outer Worker around the Durable Object RPC call; \`clientLatencyMs\` includes the public network round trip.
-
-Raw, line-delimited samples are stored beside this report in \`samples.jsonl\`.
+Raw results are in \`samples.jsonl\` beside this report.
 `;
 }
 
-function format(value) {
-  return value === null ? "n/a" : value.toFixed(1);
+function fmt(value) {
+  return value.toFixed(1);
 }
