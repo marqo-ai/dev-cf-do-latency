@@ -1,0 +1,21 @@
+{
+  "name": "cf-do-latency-repro",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler types --check && tsc --noEmit && vitest run",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "probe": "node scripts/probe.mjs",
+    "test": "vitest run",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "latest",
+    "@types/node": "latest",
+    "typescript": "~5.9.0",
+    "vitest": "latest",
+    "wrangler": "latest"
+  }
+}
